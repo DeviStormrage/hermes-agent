@@ -202,7 +202,6 @@ jobs:
 
             $ahkProc = Start-Process -FilePath ".\test-bins\autohotkey\AutoHotkey64.exe" `
               -ArgumentList "$env:INSTALL_DIR\e2e\windows\install-hermes-desktop.ahk", "$PWD\ahk.log" -PassThru -NoNewWindow -ErrorStdOut`
-              -RedirectStandardOutput ahk-stdout.log -RedirectStandardError ahk-stderr.log
 
             # Wait for AHK helper to finish. can take a long time for installer!
 
@@ -351,15 +350,3 @@ jobs:
         shell: pwsh
         run: |
           Get-Content ahk.log
-
-      - name: Autohotkey stdout
-        if: always()
-        shell: pwsh
-        run: |
-          Get-Content ahk-stdout.log
-
-      - name: Autohotkey stderr
-        if: always()
-        shell: pwsh
-        run: |
-          Get-Content ahk-stderr.log
