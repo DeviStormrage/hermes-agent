@@ -5554,12 +5554,12 @@ def _serialize_billing_state(state) -> dict:
         # same plan + top-up bars as /usage and /subscription from its single
         # fetch. Built from the separate account-info path; fail-open when logged
         # out or the portal is down.
-        "usage": _billing_usage_payload(state),
+        "usage": _usage_payload(state),
     }
 
 
-def _billing_usage_payload(state) -> dict:
-    """Best-effort shared usage model for the /topup overview's bars.
+def _usage_payload(state) -> dict:
+    """Best-effort shared usage model for the /topup + /subscription overlay bars.
 
     Only fetched when logged in; fail-open to {available:false} so the overview
     still renders if the account-info path is down.
@@ -5598,11 +5598,8 @@ def _serialize_usage_bar(bar) -> Optional[dict]:
 
     return {
         "kind": bar.kind,
-        "remaining_usd": bar.remaining_usd,
         "remaining_display": _fmt_usd(bar.remaining_usd),
-        "total_usd": bar.total_usd,
         "total_display": _fmt_usd(bar.total_usd),
-        "spent_usd": bar.spent_usd,
         "spent_display": _fmt_usd(bar.spent_usd),
         "pct_used": bar.pct_used,
         "fill_fraction": bar.fill_fraction,
@@ -5707,24 +5704,8 @@ def _serialize_subscription_state(state) -> dict:
         # separate account-info path (the only source with top-up dollars);
         # fail-open → {available:false}. Computed lazily so a logged-out state
         # adds no cost.
-        "usage": _subscription_usage_payload(state),
+        "usage": _usage_payload(state),
     }
-
-
-def _subscription_usage_payload(state) -> dict:
-    """Best-effort shared usage model for the /subscription overlay's bars.
-
-    Only fetched when logged in; fail-open to {available:false} so the overview
-    still renders if the account-info path is down.
-    """
-    if not getattr(state, "logged_in", False):
-        return {"available": False}
-    try:
-        from agent.billing_usage import build_usage_model
-
-        return _serialize_usage_model(build_usage_model())
-    except Exception:
-        return {"available": False}
 
 
 @method("subscription.state")

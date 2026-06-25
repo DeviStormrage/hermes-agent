@@ -9053,7 +9053,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         c = state.current
         is_free = not (c and c.tier_id)
-        can_change = state.can_change_plan and state.is_admin
+        can_change = state.can_change_plan
 
         plan_name = (c.tier_name or c.tier_id) if c else (usage.plan_name if usage else None)
         u_status = getattr(usage, "status", None) if usage else None

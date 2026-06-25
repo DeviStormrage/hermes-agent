@@ -73,7 +73,7 @@ function statusLine(s: SubscriptionStateResponse): string {
   const plan = s.current?.tier_name ?? u?.plan_name ?? null
   const renewsRaw = u?.renews_display ?? null
   const renews = renewsRaw ? ` · renews ${renewsRaw}` : ''
-  const viewOnly = !(s.can_change_plan && s.is_admin)
+  const viewOnly = !s.can_change_plan
 
   if (!plan) {
     return 'Plan: Free · free models only'
