@@ -13,6 +13,7 @@ from agent.subscription_view import (
     SubscriptionState,
     build_subscription_state,
     dev_fixture_subscription_state,
+    subscription_change_preview_from_payload,
     subscription_manage_url,
     subscription_state_from_payload,
 )
@@ -96,6 +97,93 @@ def test_parser_defaults_unknown_context_to_personal():
     assert s.context == "personal"
 
 
+# ── tier catalog parsing (the picker) ────────────────────────────────
+
+
+def test_parser_maps_tiers_catalog():
+    payload = {
+        "tiers": [
+            {
+                "tierId": "free",
+                "name": "Free",
+                "tierOrder": 0,
+                "dollarsPerMonthDisplay": "0",
+                "monthlyCredits": "0",
+                "isCurrent": False,
+                "isEnabled": True,
+            },
+            {
+                "tierId": "plus",
+                "name": "Plus",
+                "tierOrder": 1,
+                "dollarsPerMonthDisplay": "20",
+                "monthlyCredits": "1000",
+                "isCurrent": True,
+                "isEnabled": True,
+            },
+        ],
+    }
+    s = subscription_state_from_payload(payload, portal_url=None)
+    assert len(s.tiers) == 2
+    free, plus = s.tiers
+    # The free tier's 0s must survive (coalesce-on-None, not falsy `or`).
+    assert free.tier_id == "free" and free.tier_order == 0
+    assert free.dollars_per_month == Decimal("0")
+    assert plus.is_current is True
+    assert plus.dollars_per_month == Decimal("20") and plus.monthly_credits == Decimal("1000")
+
+
+def test_parser_tiers_absent_is_empty_tuple():
+    assert subscription_state_from_payload({}, portal_url=None).tiers == ()
+
+
+# ── preview parser (POST /preview) ───────────────────────────────────
+
+
+def test_preview_parser_charge_now():
+    p = subscription_change_preview_from_payload(
+        {
+            "effect": "charge_now",
+            "reason": None,
+            "currentTierId": "plus",
+            "currentTierName": "Plus",
+            "targetTierId": "ultra",
+            "targetTierName": "Ultra",
+            "monthlyCreditsDelta": "6000",
+            "amountDueNowCents": 1234,
+            "effectiveAt": None,
+        }
+    )
+    assert p.effect == "charge_now"
+    assert p.amount_due_now_cents == 1234
+    assert p.target_tier_name == "Ultra"
+    assert p.monthly_credits_delta == Decimal("6000")
+
+
+def test_preview_parser_scheduled_has_effective_at_and_no_charge():
+    p = subscription_change_preview_from_payload(
+        {"effect": "scheduled", "amountDueNowCents": None, "effectiveAt": "2026-08-01"}
+    )
+    assert p.effect == "scheduled"
+    assert p.amount_due_now_cents is None
+    assert p.effective_at == "2026-08-01"
+
+
+def test_preview_parser_blocked_carries_reason():
+    p = subscription_change_preview_from_payload(
+        {"effect": "blocked", "reason": "Retract the cancellation before upgrading."}
+    )
+    assert p.effect == "blocked"
+    assert p.reason and "Retract" in p.reason
+
+
+def test_preview_parser_missing_effect_fails_safe_to_blocked():
+    # A malformed quote must never read as a charge — default to blocked.
+    p = subscription_change_preview_from_payload({})
+    assert p.effect == "blocked"
+    assert p.amount_due_now_cents is None
+
+
 # ── dev fixtures (env-driven, no live portal) ────────────────────────
 
 
@@ -122,6 +210,15 @@ def test_dev_fixture_states(monkeypatch, name, checker):
     s = dev_fixture_subscription_state()
     assert s is not None
     assert checker(s)
+
+
+def test_dev_fixture_exposes_tier_catalog(monkeypatch):
+    # A picker needs a catalog: the mid fixture lists tiers with the active one flagged.
+    monkeypatch.setenv("HERMES_DEV_SUBSCRIPTION_FIXTURE", "mid")
+    s = dev_fixture_subscription_state()
+    assert s is not None and len(s.tiers) >= 2
+    current = [t for t in s.tiers if t.is_current]
+    assert len(current) == 1 and current[0].tier_id == "plus"
 
 
 def test_dev_fixture_unknown_name_fails_safe(monkeypatch):

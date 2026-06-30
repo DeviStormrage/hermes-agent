@@ -5,9 +5,11 @@ logged in or the portal is unreachable, return a struct with ``logged_in=False``
 and let the surface degrade gracefully (never crash). Money is decimal end-to-end
 (server emits decimal strings); we only format for display.
 
-The TUI ``SubscriptionOverlay`` is **deep-link only** — it never charges
-in-terminal. The manage URL is built locally on the TUI side from the
-``portal_url`` and ``org_id`` fields in the subscription state.
+The TUI ``SubscriptionOverlay`` drives the plan change in-terminal (V3): it
+previews the effect, then schedules a downgrade / cancellation / resume
+(chargeless) or applies an upgrade (charges the card on the subscription). The
+portal deep-link (built locally from ``portal_url`` + ``org_id``) remains the
+fallback for an upgrade that needs 3DS / was declined.
 
 WS1 dependency: ``GET /api/billing/subscription`` is a NAS endpoint (WS1 Phase A).
 Until it ships, the fail-open contract handles 404s — the builder returns
@@ -54,6 +56,47 @@ class CurrentSubscription:
 
 
 @dataclass(frozen=True)
+class SubscriptionTier:
+    """A selectable plan in the catalog — one row of the in-terminal tier picker.
+
+    Mirrors NAS's ``SubscriptionTierOption``. ``is_current`` marks the active plan
+    (shown but not selectable); ``is_enabled=False`` is a grandfathered tier the
+    user is on but that can no longer be selected. ``tier_order`` sorts the picker
+    and drives the upgrade-vs-downgrade direction hint.
+    """
+
+    tier_id: str
+    name: str
+    tier_order: int = 0
+    dollars_per_month: Optional[Decimal] = None
+    monthly_credits: Optional[Decimal] = None
+    is_current: bool = False
+    is_enabled: bool = True
+
+
+@dataclass(frozen=True)
+class SubscriptionChangePreview:
+    """Parsed ``POST /api/billing/subscription/preview`` — what a change would do.
+
+    ``effect`` is the disposition the commit would take:
+      - ``charge_now`` → an upgrade; ``amount_due_now_cents`` is the prorated charge.
+      - ``scheduled``  → a downgrade / same-price change at ``effective_at`` (period end).
+      - ``no_op``      → already on the target tier.
+      - ``blocked``    → the commit would be refused; ``reason`` says why.
+    """
+
+    effect: str
+    reason: Optional[str] = None
+    current_tier_id: Optional[str] = None
+    current_tier_name: Optional[str] = None
+    target_tier_id: Optional[str] = None
+    target_tier_name: Optional[str] = None
+    monthly_credits_delta: Optional[Decimal] = None
+    amount_due_now_cents: Optional[int] = None
+    effective_at: Optional[str] = None  # ISO
+
+
+@dataclass(frozen=True)
 class SubscriptionState:
     """Parsed ``GET /api/billing/subscription`` — the overview screen's data.
 
@@ -67,6 +110,7 @@ class SubscriptionState:
     role: Optional[str] = None  # "OWNER" | "ADMIN" | "MEMBER"
     context: str = "personal"  # "personal" | "team"
     current: Optional[CurrentSubscription] = None
+    tiers: tuple[SubscriptionTier, ...] = ()  # selectable catalog (picker)
     portal_url: Optional[str] = None
     # When the fetch failed (vs cleanly not-logged-in), the message for the surface.
     error: Optional[str] = None
@@ -109,6 +153,57 @@ def _parse_current(raw: Any) -> Optional[CurrentSubscription]:
     )
 
 
+def _coalesce(*vals: Any) -> Any:
+    """First non-``None`` value (preserves a legit ``0``/``0.0``, unlike ``or``).
+
+    NAS sends ``0`` for the free tier's ``tierOrder`` / ``dollarsPerMonth``; a plain
+    ``x or default`` would drop those, so coalesce on ``None`` specifically.
+    """
+    for v in vals:
+        if v is not None:
+            return v
+    return None
+
+
+def _parse_tier(raw: Any) -> Optional[SubscriptionTier]:
+    """Map one NAS ``SubscriptionTierOption`` dict into a :class:`SubscriptionTier`."""
+    if not isinstance(raw, dict):
+        return None
+    tier_id = raw.get("tierId") or raw.get("id")
+    if not tier_id:
+        return None
+    return SubscriptionTier(
+        tier_id=tier_id,
+        name=raw.get("name") or "",
+        tier_order=int(_coalesce(raw.get("tierOrder"), 0)),
+        dollars_per_month=parse_money(raw.get("dollarsPerMonthDisplay")),
+        monthly_credits=parse_money(raw.get("monthlyCredits")),
+        is_current=bool(raw.get("isCurrent")),
+        is_enabled=bool(_coalesce(raw.get("isEnabled"), True)),
+    )
+
+
+def subscription_change_preview_from_payload(
+    payload: dict[str, Any],
+) -> SubscriptionChangePreview:
+    """Map a raw ``/subscription/preview`` JSON dict into :class:`SubscriptionChangePreview`."""
+    effect = payload.get("effect")
+    cents = payload.get("amountDueNowCents")
+    return SubscriptionChangePreview(
+        # An unrecognized/missing effect is treated as ``blocked`` — fail safe, never
+        # charge on a malformed quote.
+        effect=effect if isinstance(effect, str) else "blocked",
+        reason=payload.get("reason") or None,
+        current_tier_id=payload.get("currentTierId"),
+        current_tier_name=payload.get("currentTierName"),
+        target_tier_id=payload.get("targetTierId"),
+        target_tier_name=payload.get("targetTierName"),
+        monthly_credits_delta=parse_money(payload.get("monthlyCreditsDelta")),
+        amount_due_now_cents=int(cents) if isinstance(cents, (int, float)) else None,
+        effective_at=payload.get("effectiveAt") or None,
+    )
+
+
 def subscription_state_from_payload(
     payload: dict[str, Any], *, portal_url: Optional[str] = None
 ) -> SubscriptionState:
@@ -119,6 +214,13 @@ def subscription_state_from_payload(
     raw_context = payload.get("context")
     context = raw_context if raw_context in ("personal", "team") else "personal"
 
+    raw_tiers = payload.get("tiers")
+    tiers = (
+        tuple(t for t in (_parse_tier(x) for x in raw_tiers) if t is not None)
+        if isinstance(raw_tiers, list)
+        else ()
+    )
+
     return SubscriptionState(
         logged_in=True,
         org_name=org.get("name"),
@@ -126,6 +228,7 @@ def subscription_state_from_payload(
         role=org.get("role"),
         context=context,
         current=_parse_current(payload.get("current")),
+        tiers=tiers,
         portal_url=portal_url,
     )
 
@@ -230,6 +333,28 @@ def _dev_current(**over: Any) -> CurrentSubscription:
     return CurrentSubscription(**base)
 
 
+def _dev_tiers(current_id: Optional[str]) -> tuple[SubscriptionTier, ...]:
+    """A sample plan catalog for fixtures (marks ``current_id`` as the active tier)."""
+    specs = (
+        ("free", "Free", 0, "0", "0"),
+        ("plus", "Plus", 1, "20", "1000"),
+        ("super", "Super", 2, "40", "3000"),
+        ("ultra", "Ultra", 3, "80", "7000"),
+    )
+    return tuple(
+        SubscriptionTier(
+            tier_id=tid,
+            name=name,
+            tier_order=order,
+            dollars_per_month=parse_money(dpm),
+            monthly_credits=parse_money(mc),
+            is_current=(tid == current_id),
+            is_enabled=True,
+        )
+        for tid, name, order, dpm, mc in specs
+    )
+
+
 def dev_fixture_subscription_state() -> Optional[SubscriptionState]:
     """Return a fixture :class:`SubscriptionState` for ``HERMES_DEV_SUBSCRIPTION_FIXTURE``.
 
@@ -250,27 +375,30 @@ def dev_fixture_subscription_state() -> Optional[SubscriptionState]:
     if name in ("logged-out", "logged_out", "loggedout"):
         return SubscriptionState(logged_in=False)
     if name == "free":
-        return SubscriptionState(logged_in=True, current=None, **common)
+        return SubscriptionState(logged_in=True, current=None, tiers=_dev_tiers(None), **common)
     if name in ("mid", "mid-tier"):
-        return SubscriptionState(logged_in=True, current=_dev_current(), **common)
+        return SubscriptionState(logged_in=True, current=_dev_current(), tiers=_dev_tiers("plus"), **common)
     if name in ("top", "top-tier"):
         return SubscriptionState(
             logged_in=True,
             current=_dev_current(tier_id="ultra", tier_name="Ultra", monthly_credits=Decimal("7000"), credits_remaining=Decimal("5000")),
+            tiers=_dev_tiers("ultra"),
             **common,
         )
     if name in ("not-admin", "member"):
-        return SubscriptionState(logged_in=True, current=_dev_current(), **{**common, "role": "MEMBER"})
+        return SubscriptionState(logged_in=True, current=_dev_current(), tiers=_dev_tiers("plus"), **{**common, "role": "MEMBER"})
     if name == "downgrade":
         return SubscriptionState(
             logged_in=True,
             current=_dev_current(tier_id="super", tier_name="Super", monthly_credits=Decimal("3000"), credits_remaining=Decimal("1500"), pending_downgrade_tier_name="Plus", pending_downgrade_at="2026-07-15"),
+            tiers=_dev_tiers("super"),
             **common,
         )
     if name == "cancel":
         return SubscriptionState(
             logged_in=True,
             current=_dev_current(cancel_at_period_end=True, cancellation_effective_at="2026-07-01"),
+            tiers=_dev_tiers("plus"),
             **common,
         )
     if name == "team":
