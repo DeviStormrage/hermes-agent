@@ -293,6 +293,34 @@ def atomic_roundtrip_yaml_update(
         raise
 
 
+# ── Fast YAML loading ────────────────────────────────────────────────────
+#
+# PyYAML's pure-Python SafeLoader is ~8x slower than the libyaml-backed
+# ``CSafeLoader`` C extension. Startup parses config.yaml and every plugin
+# manifest with the slow path, costing ~0.9s of cold-start time. The C loader
+# is a true drop-in for ``safe_load`` (same restricted tag set), so prefer it
+# and fall back to the pure-Python loader only when libyaml isn't compiled in.
+_fast_yaml_loader = None
+
+
+def _get_fast_yaml_loader():
+    global _fast_yaml_loader
+    if _fast_yaml_loader is None:
+        _fast_yaml_loader = getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader
+    return _fast_yaml_loader
+
+
+def fast_safe_load(stream: Any) -> Any:
+    """``yaml.safe_load`` using the libyaml C loader when available.
+
+    Accepts the same inputs as ``yaml.safe_load`` (a ``str``/``bytes`` document
+    or a readable file object) and returns the same parsed structure. Falls
+    back to PyYAML's pure-Python ``SafeLoader`` when ``CSafeLoader`` isn't
+    available, so behavior is identical everywhere — only the speed differs.
+    """
+    return yaml.load(stream, Loader=_get_fast_yaml_loader())
+
+
 # ─── JSON Helpers ─────────────────────────────────────────────────────────────
 
 
@@ -319,6 +347,17 @@ def env_int(key: str, default: int = 0) -> int:
         return default
     try:
         return int(raw)
+    except (ValueError, TypeError):
+        return default
+
+
+def env_float(key: str, default: float = 0.0) -> float:
+    """Read an environment variable as a float, with fallback."""
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
     except (ValueError, TypeError):
         return default
 
