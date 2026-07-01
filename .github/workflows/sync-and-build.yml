@@ -1,0 +1,72 @@
+name: Sync upstream + build arm64
+
+on:
+  # Daily at 06:00 UTC = 13:00 ICT (Vietnam)
+  schedule:
+    - cron: '0 6 * * *'
+  # Manual trigger from Actions tab
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-and-build:
+    name: Sync fork from upstream & build arm64 installer
+    runs-on: windows-11-arm
+
+    steps:
+      - name: Checkout fork (arm64-desktop)
+        uses: actions/checkout@v4
+        with:
+          ref: arm64-desktop
+          fetch-depth: 0
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/NousResearch/hermes-agent.git
+
+      - name: Fetch upstream main
+        run: git fetch upstream main
+
+      - name: Rebase arm64-desktop onto upstream/main
+        # Keeps the local fix commits (e.g. jsToTsPlugin) on top of latest main.
+        # Conflicts surface here as a build failure — resolve on arm64-desktop
+        # locally, then re-run the workflow.
+        run: |
+          git rebase upstream/main || {
+            echo "::error::Rebase conflict — resolve manually on arm64-desktop"
+            git rebase --abort
+            exit 1
+          }
+
+      - name: Push rebased branch
+        run: git push origin arm64-desktop --force-with-lease
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Build Hermes-Setup-arm64.exe
+        run: pwsh -File scripts/build-arm64.ps1 -OpenReleaseFolder:$false
+        shell: pwsh
+
+      - name: Locate built installer
+        id: find
+        shell: pwsh
+        run: |
+          $path = Get-ChildItem -Path . -Filter "Hermes-Setup-arm64*.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $path) { throw "Installer not found — inspect build-arm64.ps1 output above" }
+          "installer-path=$path" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Found installer: $path"
+
+      - name: Upload arm64 installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hermes-Setup-arm64
+          path: ${{ steps.find.outputs.installer-path }}
+          if-no-files-found: error
+          retention-days: 14
