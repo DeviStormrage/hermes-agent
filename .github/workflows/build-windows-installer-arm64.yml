@@ -1,0 +1,86 @@
+name: Build Windows ARM64 Installer
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'apps/desktop/**'
+      - 'apps/desktop/package.json'
+      - 'scripts/build-arm64.ps1'
+      - '.github/workflows/build-windows-installer-arm64.yml'
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+# Cancel in-progress runs when a new commit hits the same ref.
+concurrency:
+  group: arm64-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-arm64:
+    name: Hermes-Setup-arm64.exe
+    runs-on: windows-11-arm
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # Shallow clones break the bootstrap, which checks out a specific
+          # pinned commit. Bootstrap fetches the full history anyway, so we
+          # save the runner ~30s by skipping the initial deep clone.
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@82a7e1459d76b7e4c3a7a6909e5dcd1831a0e51b  # v5
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        run: irm https://astral.sh/uv/install.ps1 | iex
+        shell: pwsh
+
+      - name: Run build script
+        env:
+          # stage-native-deps.cjs reads this; arm64 staging only happens
+          # when set explicitly.
+          npm_config_arch: arm64
+        working-directory: ${{ github.workspace }}
+        run: |
+          pwsh -ExecutionPolicy Bypass -File scripts/build-arm64.ps1 -SkipDeps
+        shell: pwsh
+
+      - name: Verify arm64 binaries were staged
+        working-directory: ${{ github.workspace }}
+        run: |
+          $unpacked = "apps\desktop\release\win-arm64-unpacked"
+          $pty = "$unpacked\resources\native-deps\node-pty\prebuilds\win32-arm64\pty.node"
+          if (-not (Test-Path $pty)) {
+            Write-Error "node-pty arm64 prebuild missing: $pty"
+            exit 1
+          }
+          $hermes = "$unpacked\Hermes.exe"
+          $bytes = [System.IO.File]::ReadAllBytes($hermes)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine  = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          if ($machine -ne 0xAA64) {
+            Write-Error "Hermes.exe is not ARM64 (machine=0x$('{0:X4}' -f $machine))"
+            exit 1
+          }
+          Write-Host "[OK] Hermes.exe is ARM64, node-pty arm64 prebuild present"
+        shell: pwsh
+
+      - name: Upload NSIS installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: Hermes-Setup-arm64-installer
+          path: apps/desktop/release/Hermes-*-win-arm64.exe
+          if-no-files-found: error
