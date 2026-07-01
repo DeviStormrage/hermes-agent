@@ -225,8 +225,12 @@
     "win": {
       "legalTrademarks": "Hermes",
       "target": [
-        "nsis",
-        "msi"
+        {
+          "target": "nsis",
+          "arch": [
+            "arm64"
+          ]
+        }
       ],
       "signAndEditExecutable": false
     },
