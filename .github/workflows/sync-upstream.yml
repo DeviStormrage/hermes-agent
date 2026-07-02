@@ -1,0 +1,43 @@
+name: Sync fork arm64-desktop from upstream
+
+on:
+  # Daily 06:00 UTC = 13:00 ICT
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Rebase fork/arm64-desktop onto upstream/main
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout fork (arm64-desktop)
+        uses: actions/checkout@v4
+        with:
+          ref: arm64-desktop
+          fetch-depth: 0
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/NousResearch/hermes-agent.git
+
+      - name: Fetch upstream main
+        run: git fetch upstream main --depth=1
+
+      - name: Rebase arm64-desktop onto upstream/main
+        # On conflict the workflow fails with a red ❌ on the Actions tab.
+        # Resolve locally: cd <repo>, git rebase upstream/main, fix, push,
+        # then re-run this workflow via workflow_dispatch.
+        run: |
+          git rebase upstream/main || {
+            echo "::error::Rebase conflict — resolve manually on arm64-desktop, then re-run this workflow"
+            git rebase --abort
+            exit 1
+          }
+
+      - name: Push rebased branch
+        run: git push origin arm64-desktop --force-with-lease
